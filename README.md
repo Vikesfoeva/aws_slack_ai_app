@@ -1,6 +1,6 @@
 # Bedrock Slack Bot
 
-A Slack bot that uses AWS Bedrock's LLM models to respond to user messages.
+A Slack bot that uses AWS Bedrock's Nova Micro (Amazon Titan) model to respond to user messages.
 
 ## Prerequisites
 
@@ -30,6 +30,7 @@ A Slack bot that uses AWS Bedrock's LLM models to respond to user messages.
    - Ensure you have access to AWS Bedrock
    - Create an IAM user with appropriate Bedrock permissions
    - Note down your AWS credentials
+   - Enable access to the Amazon Titan model in Bedrock
 
 4. Install dependencies:
    ```bash
@@ -66,6 +67,7 @@ npm start
 
 ## Notes
 
-- The bot uses the Claude v2 model by default
+- The bot uses the Amazon Titan (Nova Micro) model
 - Responses are limited to 500 tokens
-- Temperature is set to 0.7 for balanced creativity and accuracy 
+- Temperature is set to 0.7 for balanced creativity and accuracy
+- Top-p sampling is set to 0.9 for better response quality 
