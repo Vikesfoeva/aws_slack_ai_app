@@ -19,28 +19,67 @@ const bedrockClient = new BedrockRuntimeClient({
   },
 });
 
+let botUserId = null;
+
+// Fetch bot user ID at startup
+(async () => {
+  const authResult = await app.client.auth.test({ token: process.env.SLACK_BOT_TOKEN });
+  botUserId = authResult.user_id;
+})();
+
 // Shared handler function
 async function handleUserMessage({ event, say }) {
+  const baseInstruction = "<<SYS>>\n" + 
+                          "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n" +
+                          "If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.\n" +
+                          "<</SYS>>";
   console.log('Received message:', event.text);
   try {
     // Extract the user's message (remove the bot mention if present)
     const userMessage = event.text.replace(/<@[^>]+>/, '').trim();
     console.log('Processed message:', userMessage);
     
-    // Prepare the prompt for Nova Micro
+    // Fetch thread history for context
+    let conversation = '';
+    let thread_ts = event.thread_ts || event.ts;
+    const result = await app.client.conversations.replies({
+      channel: event.channel,
+      ts: thread_ts,
+      token: process.env.SLACK_BOT_TOKEN
+    });
+
+    // Limit to the last 16 messages (8 user, 8 assistant turns)
+    const N = 16;
+    const recentMessages = result.messages.slice(-N);
+
+    // Build conversation history, alternating roles, no duplicates
+    for (const msg of recentMessages) {
+      if (msg.user === botUserId) {
+        conversation += `Assistant: ${msg.text}\n`;
+      } else {
+        conversation += `User: ${msg.text}\n`;
+      }
+    }
+
+    // Only add 'Assistant:' if the last message was from the user
+    const lastMsg = recentMessages[recentMessages.length - 1];
+    if (lastMsg.user !== botUserId) {
+      conversation += 'Assistant:';
+    }
+
+    // Prepare the prompt for Llama 3 70B Instruct
     const prompt = {
-      prompt: userMessage,
-      max_tokens: 500,
-      temperature: 0.7,
+      prompt: `${baseInstruction}\n${conversation}`,
+      max_gen_len: 512,
+      temperature: 0.5,
       top_p: 0.9,
-      stop_sequences: ["\n\n"]
+      // stop_sequences: ["User:"]
     };
     console.log('Sending prompt to Bedrock:', prompt);
 
     // Call AWS Bedrock
     const command = new InvokeModelCommand({
-      modelId: 'anthropic.claude-3-haiku-20240307-v1:0', // Using Claude 3 Haiku model
-      inferenceProfileArn: 'arn:aws:bedrock:us-east-2:092571177669:inference-profile/us.anthropic.claude-3-haiku-20240307-v1:0',
+      modelId: 'meta.llama3-3-70b-instruct-v1:0',
       contentType: 'application/json',
       accept: 'application/json',
       body: JSON.stringify(prompt),
@@ -52,9 +91,19 @@ async function handleUserMessage({ event, say }) {
     const responseBody = JSON.parse(new TextDecoder().decode(response.body));
     console.log('Response body:', responseBody);
     
+    // Post-process model output to remove hallucinated role labels or special tokens
+    let reply = responseBody.generation || 'Sorry, I could not generate a response.';
+    // Truncate at the first occurrence of 'User:'
+    const userIdx = reply.indexOf('User:');
+    if (userIdx !== -1) {
+      reply = reply.substring(0, userIdx);
+    }
+    // Remove any hallucinated role labels or special tokens
+    reply = reply.replace(/Assistant:|<\\?\\|end_header_id\\|>?/gi, '').trim();
+
     // Send the response back to Slack
     await say({
-      text: responseBody.completion || 'Sorry, I could not generate a response.',
+      text: reply,
       thread_ts: event.ts,
     });
     console.log('Response sent to Slack');
