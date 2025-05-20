@@ -29,18 +29,13 @@ let botUserId = null;
 
 // Shared handler function
 async function handleUserMessage({ event, say }) {
-  const baseInstruction = "<<SYS>>\n" + 
-                          "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n" +
-                          "If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.\n" +
-                          "<</SYS>>";
+
   console.log('Received message:', event.text);
   try {
-    // Extract the user's message (remove the bot mention if present)
-    const userMessage = event.text.replace(/<@[^>]+>/, '').trim();
-    console.log('Processed message:', userMessage);
-    
+    // System prompt as a string
+    const systemPromptText = "You are a helpful, respectful, and honest assistant. Always answer as helpfully as possible, while being safe.";
+
     // Fetch thread history for context
-    let conversation = '';
     let thread_ts = event.thread_ts || event.ts;
     const result = await app.client.conversations.replies({
       channel: event.channel,
@@ -48,51 +43,60 @@ async function handleUserMessage({ event, say }) {
       token: process.env.SLACK_BOT_TOKEN
     });
 
-    // Limit to the last 16 messages (8 user, 8 assistant turns)
-    const N = 16;
-    const recentMessages = result.messages.slice(-N);
-
-    // Build conversation history, alternating roles, no duplicates
-    for (const msg of recentMessages) {
-      if (msg.user === botUserId) {
-        conversation += `Assistant: ${msg.text}\n`;
-      } else {
-        conversation += `User: ${msg.text}\n`;
+    // Build messages array for Bedrock, filtering out fallback/error messages
+    const messages = [];
+    for (const msg of result.messages) {
+      if (msg.text && !msg.text.startsWith('Sorry, I could not generate a response.')) {
+        if (msg.user === botUserId) {
+          messages.push({
+            role: "assistant",
+            content: [{ text: msg.text }]
+          });
+        } else {
+          messages.push({
+            role: "user",
+            content: [{ text: msg.text }]
+          });
+        }
       }
     }
 
-    // Only add 'Assistant:' if the last message was from the user
-    const lastMsg = recentMessages[recentMessages.length - 1];
-    if (lastMsg.user !== botUserId) {
-      conversation += 'Assistant:';
-    }
+    // Limit to last N messages
+    const N = 16;
+    const limitedMessages = messages.slice(-N);
 
-    // Prepare the prompt for Llama 3 70B Instruct
-    const prompt = {
-      prompt: `${baseInstruction}\n${conversation}`,
-      max_gen_len: 512,
-      temperature: 0.5,
-      top_p: 0.9,
-      // stop_sequences: ["User:"]
+    // Prepare the payload for Amazon Nova Lite
+    const payload = {
+      inferenceConfig: {
+        "max_new_tokens": 1000,
+        "topP": 0.1,
+        "topK": 20,
+        "temperature": 0.5
+      },
+      "system": [{"text": systemPromptText}],
+      messages: limitedMessages.map(msg => ({
+        role: msg.role,
+        content: [{ text: msg.content[0].text }]
+      }))
     };
-    console.log('Sending prompt to Bedrock:', prompt);
+    console.log('Sending payload to Bedrock:', JSON.stringify(payload, null, 2));
 
     // Call AWS Bedrock
     const command = new InvokeModelCommand({
-      modelId: 'meta.llama3-3-70b-instruct-v1:0',
+      modelId: 'amazon.nova-lite-v1:0',
       contentType: 'application/json',
       accept: 'application/json',
-      body: JSON.stringify(prompt),
+      body: JSON.stringify(payload)
     });
 
     console.log('Sending request to Bedrock...');
     const response = await bedrockClient.send(command);
     console.log('Received response from Bedrock');
     const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-    console.log('Response body:', responseBody);
+    console.log('Raw response body:', JSON.stringify(responseBody, null, 2));
     
-    // Post-process model output to remove hallucinated role labels or special tokens
-    let reply = responseBody.generation || 'Sorry, I could not generate a response.';
+    // Extract the response text from the content array
+    let reply = responseBody.output?.message?.content?.[0]?.text || 'Sorry, I could not generate a response.';
     // Truncate at the first occurrence of 'User:'
     const userIdx = reply.indexOf('User:');
     if (userIdx !== -1) {
